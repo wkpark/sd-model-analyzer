@@ -748,7 +748,11 @@ if __name__ == "__main__":
 
         alpha_out = []
         mean_out = []
-        for k in ret.keys():
+        blocks = all_blocks()
+        for k in blocks:
+            k = k.rstrip(".")
+            if k not in ret:
+                continue
             x = torch.Tensor(ret[k]["x"]).detach().numpy()
             x = x.tolist()
             xx = torch.Tensor(ret[k]["mean"]).detach().numpy()
