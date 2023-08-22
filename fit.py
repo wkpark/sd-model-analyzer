@@ -8,6 +8,7 @@
 from safetensors.torch import load_file, save_file
 import sys
 import os
+import copy
 import json
 import time
 import torch
@@ -102,6 +103,27 @@ def load_model(path):
     else:
         ckpt = torch.load(path, map_location="cpu")
         return ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+
+def read_metadata_from_safetensors(filename):
+    with open(filename, mode="rb") as file:
+        metadata_len = file.read(8)
+        metadata_len = int.from_bytes(metadata_len, "little")
+        json_start = file.read(2)
+
+        assert metadata_len > 2 and json_start in (b'{"', b"{'"), f"{filename} is not a safetensors file"
+        json_data = json_start + file.read(metadata_len-2)
+        json_obj = json.loads(json_data)
+
+        res = {}
+        for k, v in json_obj.get("__metadata__", {}).items():
+            res[k] = v
+            if isinstance(v, str) and v[0:1] == '{':
+                try:
+                    res[k] = json.loads(v)
+                except Exception:
+                    pass
+
+        return res
 
 def eval(model, block, n, input):
     if block ==  "middle_block":
@@ -512,13 +534,14 @@ def load_saved(ret):
     return ret
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="LSQ Fit merging models")
+    parser = argparse.ArgumentParser(description="Fit merged models or merge models")
     parser.add_argument('-i', '--in', dest='inp', required=False, help='input blocks')
     parser.add_argument('-m', '--mid', required=False, action='store_true', help='middle block')
     parser.add_argument('-o', '--out', required=False, help='output blocks')
     parser.add_argument('-a', '--all', required=False, action='store_true', help='all blocks')
     parser.add_argument("--base", help="select base encoder", action='store_true', default=None, required=False)
-    parser.add_argument("--vae", help="select vae", action='store_true', default=None, required=False)
+    parser.add_argument("--vae", help="vae filename to bake in", default=None, required=False)
+    parser.add_argument("--novae", help="no vae", action='store_true', default=False, required=False)
     parser.add_argument("-p", "--prune", help="Pruning before merge", action='store_true', default=False, required=False)
     parser.add_argument("--mode", type=str, help="Merge mode (weight sum: Sum, Add difference: Add)", default=None, required=False)
     parser.add_argument("--sum", help="Weight sum", action='store_true', default=None, required=False)
@@ -542,7 +565,6 @@ if __name__ == "__main__":
     inp_blocks = []
     mid_block  = []
     out_blocks = []
-    vae_block  = []
     if args.inp is not None:
         inp =  args.inp.split(",")
         blk = []
@@ -576,10 +598,8 @@ if __name__ == "__main__":
         mid_block = [ "middle_block.1." ]
     if args.base:
         base_block = [ "cond_stage_model." ]
-    if args.vae is not None:
-        vae_block = [ "first_stage_model." ]
 
-    if args.inp is None and args.out is None and args.mid is None and args.base is None and args.vae is None:
+    if args.inp is None and args.out is None and args.mid is None and args.base is None:
         # get all blocks
         sel_blocks = all_blocks()
     else:
@@ -673,7 +693,8 @@ if __name__ == "__main__":
             for i in range(len(tmp), alpha_count):
                 inits.append(inits[len(inits)-1]) # fill-up empty weights
 
-    print(f" * alpha = {inits}")
+    if len(inits) > 0:
+        print(f" * alpha = {inits}")
     if len(sel_blocks) > 0:
         blocks = all_blocks()
         for l, init in enumerate(inits):
@@ -736,7 +757,8 @@ if __name__ == "__main__":
         if args.eval:
             for k in ret.keys():
                 print(f" - {k} : {-ret[k] * 1e2:.4f}%")
-    elif Path("tmp.npy").exists():
+    elif args.vae is None and not args.novae and not args.prune and Path("tmp.npy").exists():
+        print("Print saved info from tmp.npy...")
         tmp = np.load("tmp.npy", allow_pickle=True)
         ret = tmp.tolist()
         ret = load_saved(ret)
@@ -778,27 +800,68 @@ if __name__ == "__main__":
             print_out = f"mean a = ({','.join('0' if s < 1e-4 else str(round(s,5)) for s in mean_coeff[i])})"
             print(print_out)
 
+    # merge models or manage model file
+    theta_0 = {}
+    save_needed = False
     if len(modes) > 0:
         theta_0, metadata = merge(files, mode=modes, selected=sel_blocks, weights=inits, prune=args.prune, float32=args.float32)
+        save_needed = True
         if type(theta_0) is bool:
             print("Fail to merge")
             exit(-1)
-        # fix/check bad clip
-        position_id_key = 'cond_stage_model.transformer.text_model.embeddings.position_ids'
-        if position_id_key in theta_0:
-            correct = torch.tensor([list(range(77))], dtype=torch.int64, device="cpu")
-            current = theta_0[position_id_key].to(torch.int64)
-            broken = correct.ne(current)
-            broken = [i for i in range(77) if broken[0][i]]
-            if len(broken) != 0:
-                if args.fixclip:
-                    theta_0[position_id_key] = correct
-                    print(f"Fixed broken clip\n{broken}")
-                else:
-                    print(f"Broken clip!\n{broken}")
-            else:
-                print("Clip is fine")
 
+    if args.optimize is False and args.eval is False and len(theta_0) == 0:
+        # no operation
+        if len(args.files) > 0 and Path(args.files[0]).exists():
+            print(f"Loading model {args.files[0]}...")
+            theta_0 = load_model(Path(args.files[0]))
+            if args.prune:
+                print(f"Pruning model {args.files[0]}...")
+                theta_0 = prune_model(theta_0)
+                save_needed = True
+            metadata = read_metadata_from_safetensors(args.files[0])
+            if len(metadata) == 0:
+                metadata = { "format": "pt" }
+
+    # fix/check bad clip
+    position_id_key = 'cond_stage_model.transformer.text_model.embeddings.position_ids'
+    if position_id_key in theta_0:
+        correct = torch.tensor([list(range(77))], dtype=torch.int64, device="cpu")
+        current = theta_0[position_id_key].to(torch.int64)
+        broken = correct.ne(current)
+        broken = [i for i in range(77) if broken[0][i]]
+        if len(broken) != 0:
+            if args.fixclip:
+                theta_0[position_id_key] = correct
+                print(f"Fixed broken clip\n{broken}")
+                save_needed = True
+            else:
+                print(f"Broken clip!\n{broken}")
+        else:
+            print("Clip is fine")
+
+    if args.vae is not None or args.novae:
+        vae_dict = {}
+        if args.vae is not None and Path(args.vae).exists():
+            print(f"Loading vae file {args.vae}...")
+            vae = load_model(Path(args.vae))
+            # Replace VAE in model file with new VAE
+            vae_dict = {k: v for k, v in vae.items() if k[0:4] not in ["loss", "mode"]}
+        elif args.novae:
+            vae_dict = {k: 1 for k in theta_0.keys() if "first_stage_model." in k and k[18:22] not in ["loss", "mode"]}
+
+        if len(vae_dict) > 0:
+            msg = "Replace VAE" if not args.novae else "Remove VAE"
+            for k in (tqdm(vae_dict.keys(), desc=msg)):
+                key_name = "first_stage_model." + k
+                if not args.novae:
+                    theta_0[key_name] = copy.deepcopy(vae[k])
+                    theta_0[key_name] = to_half(theta_0[key_name], not args.float32)
+                else:
+                    theta_0.pop(key_name, None)
+            save_needed = True
+
+    if len(theta_0) > 0 and save_needed:
         output_file = f"{args.output}.safetensors"
         print(f"saving {output_file}...")
         save_file(theta_0, output_file, metadata)
