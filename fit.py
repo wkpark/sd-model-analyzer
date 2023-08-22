@@ -378,7 +378,6 @@ def merge(files, mode="sum", selected=None, weights=None, prune=True, float32=Fa
         if k in keys:
             keys.remove(k)
             item = theta_0.pop(k)
-            print(f"{k} = {item}")
             keyremains.append(k)
 
     model_base = {}
