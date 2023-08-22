@@ -1,17 +1,21 @@
 #
 # MIT License
 #
-# merged model analyzer using optimizer by wkpark at gmail.com
+# merged model merger/analyzer using optimizer by wkpark at gmail.com
 #
 # - ASimilarity Calculator source used in this code.
 #
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 import sys
+import os
+import json
+import time
 import torch
 from pathlib import Path
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from tqdm import tqdm
 
 import argparse
 
@@ -75,8 +79,19 @@ def model_hash(filename):
     except FileNotFoundError:
         return 'NOFILE'
 
+def prune_model(model):
+    keys = list(model.keys())
+    for k in keys:
+        if "diffusion_model." not in k and "first_stage_model." not in k and "cond_stage_model." not in k:
+            model.pop(k, None)
+    return model
+
 def to_half(tensor, enable):
-    if enable and tensor.dtype == torch.float:
+    if enable and type(tensor) is dict:
+        for key in tensor.keys():
+            if 'model' in key and tensor[key].dtype == torch.float:
+                tensor[key] = tensor[key].half()
+    elif enable and tensor.dtype == torch.float:
         return tensor.half()
 
     return tensor
@@ -190,22 +205,13 @@ def func(x, block, n, attn_a, rand_inputs, models):
 
     return val
 
-def find(init=None, method='nelder-mead', float32=False, evaluate=False):
-    global block
-    global n
-    global attn_a
-    global rand_inputs
+def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.00001, float32=False, evaluate=False):
     global models
-
-    global sd_version
-    global xtol
-
-    global files
 
     file1 = Path(files[0])
     model_files = files[1:]
 
-    if len(models) == 0 or "fit_model" not in models.keys():
+    if len(models) == 0 or "fit_model" not in models:
         fit_model = load_model(file1)
 
         print()
@@ -220,13 +226,6 @@ def find(init=None, method='nelder-mead', float32=False, evaluate=False):
         print(f"- sd_version = {sd_version}")
     else:
         fit_model = models["fit_model"]
-
-    qkvs = load_qkvs(fit_model, block, n, float32=float32)
-    if f"{block}.{n}" in rand_inputs.keys():
-        rand_input = rand_inputs[f"{block}.{n}"]
-    else:
-        rand_input = init_rand(qkvs, block, n)
-        rand_inputs[f"{block}.{n}"] = rand_input
 
     # load the BASE model
     if "base_model" not in models.keys():
@@ -243,52 +242,275 @@ def find(init=None, method='nelder-mead', float32=False, evaluate=False):
     else:
         base_model = models["base_model"]
 
-    # load the original model
-    attn_a = eval(qkvs, block, n, rand_input)
+    ret = {}
+    # optimize mode. only cross-attention capable blocks
+    for i,x in enumerate(sel_blocks):
+        if "input_blocks." in x:
+            n = int(x[13:len(x)-1])
+            block = "input_blocks"
+        elif "middle_block." in x:
+            n = 1
+            block = "middle_block"
+        elif "output_blocks." in x:
+            n = int(x[14:len(x)-1])
+            block = "output_blocks"
 
-    j = 0
-    arr = []
-    # bounds
-    ub = []
-    lb = []
-    for file in model_files:
+        qkvs = load_qkvs(fit_model, block, n, float32=float32)
+        if f"{block}.{n}" in rand_inputs.keys():
+            rand_input = rand_inputs[f"{block}.{n}"]
+        else:
+            rand_input = init_rand(qkvs, block, n)
+            rand_inputs[f"{block}.{n}"] = rand_input
+
+        # load the original model
+        attn_a = eval(qkvs, block, n, rand_input)
+
+        arr = []
+        # bounds
+        ub = []
+        lb = []
+        for j, file in enumerate(model_files):
+            file = Path(file)
+            name = chr(97 + j)
+            model_name = f"model_{name}"
+            if f"{model_name}_orig" not in models:
+                # make mode_a, model_b, ...
+                print(f" - load {model_name}: {file.name}")
+                #print(f" - load {model_name}: {file.name} [{model_hash(file)}]")
+                model = load_model(file)
+                models[f"{model_name}_orig"] = model
+            else:
+                model = models[f"{model_name}_orig"]
+
+            qkvs = load_qkvs(model, block, n, base_model=models["base_model"], float32=float32)
+            models[model_name] = qkvs
+
+            arr.append(0.1)
+            # upper bound
+            ub.append(1.5)
+            # lower bound
+            lb.append(-0.5)
+            #del model
+
+        print(f" - block = {block}, n = {n}")
+        bounds = Bounds(lb, ub)
+
+        # some initial weights
+        if inits is not None:
+            for k, v in enumerate(inits[:len(arr)]):
+                arr[k] = v[i]
+        else:
+            arr[0] = [0.4]
+        print(f"initial weights = {arr}")
+
+        options={'gtol': 1e-8, 'xatol': xtol, 'xtol': xtol, 'disp': True}
+
+        if evaluate: # only evaluate
+            res = func(arr, block, n, attn_a, rand_inputs, models)
+        else:
+            res = minimize(func, arr, args=(block, n, attn_a, rand_inputs, models), method=method,
+                  options=options, bounds=bounds)
+
+            # print results
+            print(f"seed = {seed}")
+            print(res)
+        ret[f"{block}.{n}"] = res
+
+    return ret
+
+def all_blocks():
+    # return all blocks
+    blocks = [ "cond_stage_model." ]
+    for i in range(0,12):
+        blocks.append(f"input_blocks.{i}.")
+    blocks.append("middle_block.1.")
+    for i in range(0,12):
+        blocks.append(f"output_blocks.{i}.")
+    return blocks
+
+def print_blocks(blocks):
+    str = []
+    for i,x in enumerate(blocks):
+        if "input_blocks." in x:
+            n = int(x[13:len(x)-1])
+            block = f"IN{n:02d}"
+            str.append(block)
+        elif "middle_block." in x:
+            block = "MID00"
+            str.append(block)
+        elif "output_blocks." in x:
+            n = int(x[14:len(x)-1])
+            block = f"OUT{n:02d}"
+            str.append(block)
+        elif "cond_stage_model" in x:
+            block = f"BASE"
+            str.append(block)
+    return ','.join(str)
+
+def merge(files, mode="sum", selected=None, weights=None, prune=True, float32=False):
+    '''Merge checkpoint files'''
+    file1 = Path(files[0])
+    model_files = files[1:]
+
+    t0 = time.time()
+    print(f"Loading model_a {file1}...")
+    model_a = load_model(file1)
+    if prune:
+        model_a = prune_model(model_a)
+
+    # get keylist of all selected
+    keys = []
+    keyremains = []
+    theta_0 = {}
+    for k in model_a.keys():
+        keyadded = False
+        for s in selected:
+            if s in k:
+                keys.append(k)
+                theta_0[k] = model_a[k]
+                keyadded = True
+        if not keyadded:
+            keyremains.append(k)
+
+    # preserve some dicts
+    checkpoint_dict_skip_on_merge = ["cond_stage_model.transformer.text_model.embeddings.position_ids"]
+    for k in checkpoint_dict_skip_on_merge:
+        if k in keys:
+            keys.remove(k)
+            item = theta_0.pop(k)
+            print(f"{k} = {item}")
+            keyremains.append(k)
+
+    model_base = {}
+    weight_start = 0
+
+    modes = [ mode ] if type(mode) is str else mode
+
+    # prepare metadata
+    metadata = { "format": "pt" }
+    merge_recipe = {
+        "type": "sd-model-analyzer",
+        "weights_alpha": weights,
+        "model_a": file1.name,
+        "mode": modes,
+        "mbw": True,
+        "calcmode": "normal",
+    }
+
+    recipe_all = None
+    if "add" in modes or "madd" in modes:
+        # automatically detect sd_version and read the base model
+        v15 = "v1-5-pruned-emaonly.safetensors"
+        v21 = "v2-1_768-nonema-pruned.safetensors"
+        dirs = [ ".", "..", "../..", "models", "Stable-diffusion/models" ]
+
+        w = model_a["model.diffusion_model.input_blocks.1.1.proj_in.weight"]
+        if len(w.shape) == 4:
+            sd_base = v15
+        else:
+            sd_base = v21
+
+        for d in dirs:
+            path = os.path.join(d, sd_base)
+            if Path(path).exists():
+                print(f"Loading model_base {sd_base}...")
+                file = Path(path)
+                merge_recipe["model_base"] = file.name
+                model_base = load_model(file)
+                break
+        if len(model_base) == 0:
+            print(f"No {sd_base} found. aborting...")
+            return False
+
+        if modes[0] == 'madd':
+            for key in (tqdm(keys, desc=f"Prepare theta_0 for madd mode...")):
+                i = 0
+                for j, sel in enumerate(selected):
+                    if sel in key:
+                        i = j
+                        break
+                base = model_base[key]
+                theta_0[key] = base + (theta_0[key] - base) * weights[0][i]
+            # first weights used
+            weight_start = 1
+            recipe_all = "model_base + (model_a - model_base) * alpha[0]"
+
+    # merge main
+    stages = len(model_files)
+    for n, file in enumerate(model_files,start=weight_start):
         file = Path(file)
-        model = load_model(file)
-        qkvs = load_qkvs(model, block, n, base_model=models["base_model"], float32=float32)
-        # make mode_a, model_b, ...
-        name = chr(97 + j)
-        model_name = f"model_{name}"
-        print(f" - load {model_name}: {file.name}")
-        #print(f" - load {model_name}: {file.name} [{model_hash(file)}]")
-        models[model_name] = qkvs
-        j += 1
-        arr.append(0.1)
-        # upper bound
-        ub.append(1.5)
-        # lower bound
-        lb.append(-0.5)
-        del model
+        print(f"Loading model {file.name}...")
+        theta_1 = load_model(file)
+        model_name = f"model_{chr(97+n+1-weight_start)}"
+        merge_recipe[model_name] = file.name
 
-    print(f" - block = {block}, n = {n}")
-    bounds = Bounds(lb, ub)
+        alpha = weights[n]
+        print(f"mode = {modes[n]}, alpha = {alpha}")
+        # Add the models together in specific ratio to reach final ratio
+        for key in (tqdm(keys, desc=f"Stage #{n+1-weight_start}/{stages}")):
+            if "model_" in key:
+                continue
+            if key in checkpoint_dict_skip_on_merge:
+                continue
+            if "model" in key and key in theta_0:
+                i = 0
+                for j, sel in enumerate(selected):
+                    if sel in key:
+                        i = j
+                        break
+                if modes[n] == "sum":
+                    theta_0[key] = (1 - alpha[i]) * (theta_0[key]) + alpha[i] * theta_1[key]
+                else:
+                    theta_0[key] = theta_0[key] + (theta_1[key] - model_base[key]) * alpha[i]
 
-    # some initial weights
-    if init is not None:
-        for i, v in enumerate(init):
-            arr[i]  = v
-    else:
-        arr[0] = 0.4
+        if modes[n] == "sum":
+            if recipe_all is None:
+                recipe_all = f"model_a * (1 - alpha[{n}]) + {model_name} * alpha[{n}]"
+            else:
+                recipe_all = f"({recipe_all}) * (1 - alpha[{n}]) + {model_name} * alpha[{n}]"
+        elif modes[n] in [ "add", "madd" ]:
+            if recipe_all is None:
+                recipe_all = f"model_a + ({model_name} - model_base) * alpha[{n}]"
+            else:
+                recipe_all = f"{recipe_all} + ({model_name} - model_base) * alpha[{n}]"
 
-    if evaluate: # only evaluate
-        res = func(arr, block, n, attn_a, rand_inputs, models)
-    else:
-        res = minimize(func, arr, args=(block, n, attn_a, rand_inputs, models), method=opt_method,
-              options={'gtol': 1e-8, 'xatol': xtol, 'xtol': xtol, 'disp': True}, bounds=bounds)
+        if n == weight_start:
+            for key in (tqdm(keys, desc="Check uninitialized")):
+                if "model" in key:
+                    for s in selected:
+                        if s in key and key not in theta_0 and key not in checkpoint_dict_skip_on_merge:
+                            print(f" +{k}")
+                            theta_0[key] = theta_1[key]
 
-        # print results
-        print(f"seed = {seed}")
-        print(res)
-    return res
+        del theta_1
+
+    # store unmodified remains
+    if len(keyremains) > 0:
+        print("save not modified weights...")
+
+    for key in (tqdm(keyremains, desc="Save unchanged remains")):
+        theta_0[key] = model_a[key]
+    t1 = time.time()
+    print(f"- execution time: {t1 - t0}")
+
+    merge_recipe["model_recipe"] = recipe_all
+    metadata["sd_merge_recipe"] = json.dumps(merge_recipe)
+
+    return to_half(theta_0, not float32), metadata
+
+def load_saved(ret):
+    nret = {}
+    if "count" not in list(ret.keys())[0]:
+        # convert old format to new
+        for k in ret.keys():
+            if type(ret[k]) is not dict:
+                x = ret[k].x
+                fun = float(ret[k].fun)
+                nret[k] = {"fun": fun, "x": x, "success": ret[k].success, "count": 1, "mean": x, "sum": x}
+            else:
+                nret[k] = ret[k]
+        ret = nret
+    return ret
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LSQ Fit merging models")
@@ -296,44 +518,46 @@ if __name__ == "__main__":
     parser.add_argument('-m', '--mid', required=False, action='store_true', help='middle block')
     parser.add_argument('-o', '--out', required=False, help='output blocks')
     parser.add_argument('-a', '--all', required=False, action='store_true', help='all blocks')
+    parser.add_argument("--base", help="select base encoder", action='store_true', default=None, required=False)
+    parser.add_argument("--vae", help="select vae", action='store_true', default=None, required=False)
+    parser.add_argument("-p", "--prune", help="Pruning before merge", action='store_true', default=False, required=False)
+    parser.add_argument("--mode", type=str, help="Merge mode (weight sum: Sum, Add difference: Add)", default=None, required=False)
+    parser.add_argument("--sum", help="Weight sum", action='store_true', default=None, required=False)
+    parser.add_argument("--add", help="Add difference", action='store_true', default=None, required=False)
+    parser.add_argument("--fit", "--optimize", dest="optimize", help="Optimize mode", action='store_true', default=False, required=False)
     parser.add_argument('-s', '--seed', type=int, required=False, help='seed')
-    parser.add_argument('-w', dest='init', required=False, help='initial weights')
+    parser.add_argument('-w', '--alpha', dest='init', required=False, help='initial weights')
     parser.add_argument('-d', '--debug', required=False, action='store_true', help='debug some information')
     parser.add_argument('-e', '--eval', required=False, action='store_true', help='evaluate initial weights if available')
     parser.add_argument('--method', required=False, help='optimize method (available method Nelder-Mead:default, Powell)')
     parser.add_argument('-x', '--xtol', required=False, help='xtol option for minimize')
     parser.add_argument('-c', '--clear', required=False, action='store_true', help='clear saved file')
-    parser.add_argument('-f32', '--float32', required=False, action='store_true', help='float32')
+    parser.add_argument('--fp32', '--usefp32', dest='float32', required=False, action='store_true', help='Use float32')
+    parser.add_argument('-O', dest='output', required=False, default='merged', help='Merged output file')
     parser.add_argument('files', nargs='+', metavar='file', help='model file names')
 
-    # support SD v1.5, v2.1
-    INPBLOCKS = [1,2,4,5,7,8]
-    OUTBLOCKS = [3,4,5,6,7,8,9,10,11]
-    BLOCKNAMES = [ "input_blocks", "middle_block", "output_blocks" ]
-
     args = parser.parse_args()
-    xtol = float(args.xtol) if args.xtol else 0.00001
-    opt_method = args.method.lower() if args.method and args.method.lower() in opt_methods else "nelder-mead"
 
-    selected = []
+    selected   = []
+    base_block = []
+    inp_blocks = []
+    mid_block  = []
+    out_blocks = []
+    vae_block  = []
     if args.inp is not None:
         inp =  args.inp.split(",")
-        print(inp)
         blk = []
         for x in inp:
             try:
                 x = int(x)
-                if x in INPBLOCKS:
-                    blk.append(x)
+                if x in range(0,12):
+                    blk.append(f"input_blocks.{x}.")
             except ValueError:
                 pass
 
         if len(blk) > 0:
             print(f"selected input_blocks are {blk}")
             inp_blocks = blk
-            selected.append("input_blocks")
-    else:
-        inp_blocks = []
 
     if args.out is not None:
         out =  args.out.split(",")
@@ -341,119 +565,239 @@ if __name__ == "__main__":
         for x in out:
             try:
                 x = int(x)
-                if x in OUTBLOCKS:
-                    blk.append(x)
+                if x in range(0,12):
+                    blk.append(f"output_blocks.{x}.")
             except ValueError:
                 pass
 
         if len(blk) > 0:
-            print(f"selected output_blocks are {blk}")
             out_blocks = blk
-            selected.append("output_blocks")
-    else:
-        out_blocks = []
 
     if args.mid:
-        selected.append("middle_block")
+        mid_block = [ "middle_block.1." ]
+    if args.base:
+        base_block = [ "cond_stage_model." ]
+    if args.vae is not None:
+        vae_block = [ "first_stage_model." ]
 
-    # all blocks?
-    if args.all:
-        inp_blocks = INPBLOCKS
-        out_blocks = OUTBLOCKS
-        sel_blocks = BLOCKNAMES
+    if args.inp is None and args.out is None and args.mid is None and args.base is None and args.vae is None:
+        # get all blocks
+        sel_blocks = all_blocks()
     else:
-        # rearrange selected blocks
-        sel_blocks = []
-        for x in BLOCKNAMES:
-            if x in selected:
-                sel_blocks.append(x)
+        sel_blocks = base_block + inp_blocks + mid_block + out_blocks
 
-    # set seed
-    if args.seed is not None:
-        seed = args.seed
+    # support SD v1.5, v2.1
+    INPBLOCKS = [1,2,4,5,7,8]
+    OUTBLOCKS = [3,4,5,6,7,8,9,10,11]
+    opt_sel_blocks = []
+    if args.optimize:
+        # optimize mode. only cross-attention capable blocks
+        for i,x in enumerate(sel_blocks):
+            if "input_blocks." in x:
+                n = int(x[13:len(x)-1])
+                if n in INPBLOCKS:
+                    opt_sel_blocks.append(x)
+            elif "middle_block." in x:
+                opt_sel_blocks.append(x)
+            elif "output_blocks." in x:
+                n = int(x[14:len(x)-1])
+                if n in OUTBLOCKS:
+                    opt_sel_blocks.append(x)
 
-    init = None
+    if len(inp_blocks)>0:
+        print(f" * input blocks = {print_blocks(inp_blocks)}")
+    if len(out_blocks)>0:
+        print(f" * output blocks = {print_blocks(out_blocks)}")
+    #print(f" * middle block = {mid_block}")
+    #print(f" * base block = {base_block}")
+    if len(sel_blocks) > 0:
+        print(f" * selected blocks = {print_blocks(sel_blocks)}")
+    if len(opt_sel_blocks) > 0:
+        print(f" * optimize blocks = {print_blocks(opt_sel_blocks)}")
+
+    # block level weights
+    # normal sum-weights mode (sum)
+    # - model_a + model_b merge case: only 1 alpha needed, for block-level weights blocks amount alphas needed
+    # add-difference mode (add)
+    # - model_a + model_b add-difference merge case: only 1 alpha needed
+    # multiple add-difference mode
+    # - a * model_a + b * model_b : a, b pair needed
+    # - a * model_a + b * model_b + c * model_c : a,b,c alphas needed
+    alpha_count = len(args.files) - 1
+
+    mode = None
+    if args.add:
+        args.mode ='add'
+    if args.sum:
+        args.mode ='sum'
+
+    modes = []
+    alias = { "add+": "madd", "++": "madd" }
+    if args.mode is not None:
+        tmp = args.mode.lower().split(",")
+        for k, m in enumerate(tmp):
+           if m in alias:
+               m = alias[m]
+           if m in [ "sum", "add", "madd" ]:
+               modes.append(m)
+           if k == 0 and m == "madd":
+               alpha_count += 1
+
+        print(f"alpha_count = {alpha_count}")
+        if len(modes) < alpha_count:
+            for i in range(len(modes), alpha_count):
+               lastmode = modes[len(modes)-1]
+               modes.append(lastmode)
+
+        print(f"modes = {modes}")
+
+    inits = []
     if args.init is not None:
-        init = []
-        tmp = args.init.split(",")
-        for x in tmp:
-            try:
-                x = float(x)
-                init.append(x)
-            except ValueError:
-                print(f"invalid initial weght {x}")
-                exit(-1)
+        blocks_size = len(opt_sel_blocks) if args.optimize else len(sel_blocks)
+        tmp = args.init.split(":") # model
+
+        for j, w in enumerate(tmp[:alpha_count]):
+            init = [0] * blocks_size
+            ws = tmp[j].split(",") # block level alpha
+            for i, x in enumerate(ws[:blocks_size]):
+                try:
+                    x = float(x)
+                    init[i] = x
+                except ValueError:
+                    print(f"invalid initial weight {ws}")
+                    exit(-1)
+            if len(ws) < len(init):
+                for i in range(len(ws), len(init)):
+                    init[i] = init[len(ws)-1] # fill-up empty weights with the last one given
+            inits.append(init)
+        if len(tmp) < alpha_count:
+            for i in range(len(tmp), alpha_count):
+                inits.append(inits[len(inits)-1]) # fill-up empty weights
+
+    print(f" * alpha = {inits}")
+    if len(sel_blocks) > 0:
+        blocks = all_blocks()
+        for l, init in enumerate(inits):
+            norm = [0.0]*len(blocks)
+            for k,b in enumerate(blocks):
+                for j,s in enumerate(sel_blocks):
+                    if s in b:
+                        norm[k] = init[j]
+            normalout = f"({','.join('0' if s == 0.0 else str(round(s,5)) for s in norm)})"
+            print(f"  > normalized block weights for merge #{l+1}: {normalout}")
 
     # set files
     files = args.files
-
     debug = args.debug
 
-    print(f" * input blocks = {inp_blocks}")
-    print(f" * output blocks = {out_blocks}")
-    print(f" * selected blocks = {sel_blocks}")
-    print(f" * seed = {seed}")
-    print(f" * optimize method = {opt_method}")
-
-    '''
-    # for example
-    block = "output_blocks"
-    n = 10
-    seed = 114514
-    r = find(init=None)
-    print(f"block = {block}, n ={n}")
-
-    torch.set_printoptions(sci_mode=False)
-    print(torch.Tensor(r.x))
-    exit(0)
-    '''
-
-    torch.manual_seed(seed)
-
-    # print options
-    torch.set_printoptions(sci_mode=False, precision=6)
-
     ret = {}
-    # load old results
-    if not args.eval and Path("tmp.npy").exists() and not args.clear:
+    if args.optimize or args.eval:
+        # set seed
+        if args.seed is not None:
+             seed = args.seed
+
+        xtol = float(args.xtol) if args.xtol else 0.00001
+        opt_method = args.method.lower() if args.method and args.method.lower() in opt_methods else "nelder-mead"
+
+        print(f" * seed = {seed}")
+        print(f" * optimize method = {opt_method}")
+
+        torch.manual_seed(seed)
+
+        # print options
+        torch.set_printoptions(sci_mode=False, precision=6)
+
+        r = fit(files, selected=opt_sel_blocks, inits=inits, method=opt_method, xtol=xtol, float32=args.float32, evaluate=args.eval)
+        # load old results
+        if not args.eval and Path("tmp.npy").exists() and not args.clear:
+            tmp = np.load("tmp.npy", allow_pickle=True)
+            ret = tmp.tolist()
+            ret = load_saved(ret)
+
+        if args.optimize:
+            for k in r.keys():
+                x = r[k].x
+                fun = float(r[k].fun)
+                count = 1
+                sum = [0.0]*len(x)
+                if k in ret and "count" in ret[k]:
+                    count = ret[k]["count"] + 1
+                    sum = ret[k]["sum"] + x
+                    mean = sum/count
+                else:
+                    mean = sum = x
+
+                ret[k] = {"fun": fun, "x": x, "success": r[k].success, "count": count, "mean": mean, "sum": sum}
+
+        # save results
+        if not args.eval:
+            np.save("tmp.npy", ret)
+
+        print(f" * seed = {seed}")
+        if args.eval:
+            for k in ret.keys():
+                print(f" - {k} : {-ret[k] * 1e2:.4f}%")
+    elif Path("tmp.npy").exists():
         tmp = np.load("tmp.npy", allow_pickle=True)
         ret = tmp.tolist()
+        ret = load_saved(ret)
 
-    for b in sel_blocks:
-        if b == "input_blocks":
-            for j in inp_blocks:
-                n = j
-                block = b
-                r = find(init, evaluate=args.eval, float32=args.float32)
-                ret[f"{b}.{n}"] = r
-        elif b == "middle_block":
-            n = 1
-            block = b
-            r = find(init, evaluate=args.eval, float32=args.float32)
-            ret[f"{b}.{n}"] = r
+    if len(ret) > 0 and not args.eval:
+        # print results
+        np.set_printoptions(precision=6)
 
-        elif b == "output_blocks":
-            for j in out_blocks:
-                block = b
-                n = j
-                r = find(init, evaluate=args.eval, float32=args.float32)
-                ret[f"{b}.{n}"] = r
-
-    print(f" * seed = {seed}")
-
-    # save results
-    if not args.eval:
-        np.save("tmp.npy", ret)
-
-    # print results
-    np.set_printoptions(precision=6)
-
-    if args.eval:
+        alpha_out = []
+        mean_out = []
         for k in ret.keys():
-            print(f" - {k} : {-ret[k] * 1e2:.4f}%")
-        exit(0)
+            x = torch.Tensor(ret[k]["x"]).detach().numpy()
+            x = x.tolist()
+            xx = torch.Tensor(ret[k]["mean"]).detach().numpy()
+            xx = xx.tolist()
+            print_x = f"[ {', '.join(str(round(s,5)) for s in x)} ]"
+            print(f"{k} : {print_x} / {-ret[k]['fun'] * 1e2:.4f}%")
+            alpha_out.append(x)
+            mean_out.append(xx)
 
-    for k in ret.keys():
-        print(f"{k} : {-ret[k].fun * 1e2:.4f}%")
-        x = torch.Tensor(ret[k].x).detach().numpy()
-        print(x)
+        print("")
+        coeff = [[]]*len(alpha_out[0])
+        mean_coeff = [[]]*len(alpha_out[0])
+        for j in range(0, len(alpha_out[0])):
+            coeff[j] = [0]*len(alpha_out)
+            mean_coeff[j] = [0]*len(alpha_out)
+            for i in range(0, len(alpha_out)):
+                coeff[j][i] = alpha_out[i][j]
+                mean_coeff[j][i] = mean_out[i][j]
+
+        for i in range(0, len(coeff)):
+            print_out = f"alpha  = ({','.join('0' if s < 1e-4 else str(round(s,5)) for s in coeff[i])})"
+            print(print_out)
+        for i in range(0, len(coeff)):
+            print_out = f"mean a = ({','.join('0' if s < 1e-4 else str(round(s,5)) for s in mean_coeff[i])})"
+            print(print_out)
+
+    if len(modes) > 0:
+        theta_0, metadata = merge(files, mode=modes, selected=sel_blocks, weights=inits, prune=args.prune, float32=args.float32)
+        if type(theta_0) is bool:
+            print("Fail to merge")
+            exit(-1)
+        # fix/check bad clip
+        position_id_key = 'cond_stage_model.transformer.text_model.embeddings.position_ids'
+        if position_id_key in theta_0:
+            correct = torch.tensor([list(range(77))], dtype=torch.int64, device="cpu")
+            current = theta_0[position_id_key].to(torch.int64)
+            broken = correct.ne(current)
+            broken = [i for i in range(77) if broken[0][i]]
+            if len(broken) != 0:
+                if args.fixclip:
+                    theta_0[position_id_key] = correct
+                    print(f"Fixed broken clip\n{broken}")
+                else:
+                    print(f"Broken clip!\n{broken}")
+            else:
+                print("Clip is fine")
+
+        output_file = f"{args.output}.safetensors"
+        print(f"saving {output_file}...")
+        save_file(theta_0, output_file, metadata)
+        print("Done.")
+
