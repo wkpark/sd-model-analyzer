@@ -680,6 +680,7 @@ if __name__ == "__main__":
             ws = tmp[j].split(",") # block level alpha
             for i, x in enumerate(ws[:blocks_size]):
                 try:
+                    x = x.replace("\\", "")
                     x = float(x)
                     init[i] = x
                 except ValueError:
@@ -733,6 +734,12 @@ if __name__ == "__main__":
             tmp = np.load("tmp.npy", allow_pickle=True)
             ret = tmp.tolist()
             ret = load_saved(ret)
+            # check size
+            k1 = list(ret.keys())[0]
+            k2 = list(r.keys())[0]
+            if len(ret[k1]["x"]) != len(r[k2].x):
+                # size mismatched. ignore
+                ret = {}
 
         if args.optimize:
             for k in r.keys():
