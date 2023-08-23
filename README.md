@@ -4,7 +4,7 @@ Merged model analyzer using scipy's [scipy.optimize.minimize()](https://docs.sci
 ## usage
 The following command tries to interpolate Anything model using `blessingMix_V1Fp16.safetensors` and `bp_mk5.safetensors` with `output_blocks` `4,5,6`
 ~~~bash
-python sd-model-merger/fit.py Anything_v3Fixed-prunedFp16.safetensors blessingMix_V1Fp16.safetensors bp_mk5.safetensors --out 4,5,6
+python sd-model-merger/fit.py Anything_v3Fixed-prunedFp16.safetensors blessingMix_V1Fp16.safetensors bp_mk5.safetensors --out 4,5,6 --fit
 selected output_blocks are [4, 5, 6]
  * input blocks = []
  * output blocks = [4, 5, 6]
@@ -60,26 +60,36 @@ output_blocks.6 : 94.3215%
 ~~~
 
 ~~~bash
-python sd-model-merger/fit.py  --help
-usage: fit.py [-h] [-i INP] [-m] [-o OUT] [-a] [-s SEED] [-w INIT] [-d] [-e] [--method METHOD] [-x XTOL] [-c] [-f32] file [file ...]
+usage: fit.py [-h] [-i INP] [-m] [-o OUT] [-a] [--base] [--vae VAE] [--novae] [-p] [--mode MODE] [--sum] [--add] [--fit] [-s SEED] [-w INIT] [-d] [-e] [--method METHOD] [-x XTOL] [-c] [--fp32] [-O OUTPUT]
+              file [file ...]
 
-LSQ Fit merging models
+Fit merged models or merge models
 
 positional arguments:
   file                  model file names
 
 options:
   -h, --help            show this help message and exit
-  -i INP, --in INP      input blocks
-  -m, --mid             middle block
-  -o OUT, --out OUT     output blocks
-  -a, --all             all blocks
-  -s SEED, --seed SEED  seed
-  -w INIT               initial weights
+  -i INP, --in INP      select input blocks
+  -m, --mid             select middle block
+  -o OUT, --out OUT     select output blocks
+  -a, --all             select all blocks
+  --base                select base encoder
+  --vae VAE             vae filename to bake in
+  --novae               no vae
+  -p, --prune           Pruning before merge
+  --mode MODE           Merge mode (weight sum: Sum, Add difference: Add, Multiple add-diff: Madd)
+  --sum                 Weight sum merge mode
+  --add                 Add difference merge mode
+  --fit, --optimize     Optimize mode
+  -s SEED, --seed SEED  select seed
+  -w INIT, --alpha INIT
+                        initial weights
   -d, --debug           debug some information
   -e, --eval            evaluate initial weights if available
   --method METHOD       optimize method (available method Nelder-Mead:default, Powell)
-  -x XTOL, --xtol XTOL  xtol option for minimize
-  -c, --clear           clear saved file
-  -f32, --float32       float32
+  -x XTOL, --xtol XTOL  xtol option for optimize
+  -c, --clear           clear saved file (tmp.npy)
+  --fp32, --usefp32     Use float32
+  -O OUTPUT             Merged output file
 ~~~
