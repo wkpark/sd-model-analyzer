@@ -757,9 +757,15 @@ if __name__ == "__main__":
                 count = 1
                 sum = [0.0]*len(x)
                 if k in ret and "count" in ret[k]:
-                    count = ret[k]["count"] + 1
-                    sum = ret[k]["sum"] + x
-                    mean = sum/count
+                    if abs(ret[k]["fun"] - fun) < 0.0005:
+                        # similar result?
+                        count = ret[k]["count"] + 1
+                        sum = ret[k]["sum"] + x
+                        mean = sum/count
+                    elif fun < ret[k]["fun"]:
+                        mean = sum = x
+                    else:
+                        continue
                 else:
                     mean = sum = x
 
