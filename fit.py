@@ -20,7 +20,7 @@ from tqdm import tqdm
 
 import argparse
 
-from scipy.optimize import minimize, Bounds
+from scipy.optimize import minimize, basinhopping, shgo, Bounds
 
 models = {}
 qkvs = {}
@@ -227,7 +227,7 @@ def func(x, block, n, attn_a, rand_inputs, models):
 
     return val
 
-def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.00001, float32=False, evaluate=False):
+def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.00001, float32=False, evaluate=False, use_global=None):
     global models
 
     file1 = Path(files[0])
@@ -330,8 +330,16 @@ def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.00001, fl
         if evaluate: # only evaluate
             res = func(arr, block, n, attn_a, rand_inputs, models)
         else:
-            res = minimize(func, arr, args=(block, n, attn_a, rand_inputs, models), method=method,
-                  options=options, bounds=bounds)
+            if use_global is not None:
+                if use_global == "shgo":
+                    res = shgo(func, bounds, args=(block, n, attn_a, rand_inputs, models), minimizer_kwargs={"method": method, "xtol":xtol},
+                          options={ "disp": True })
+                else:
+                    res = basinhopping(func, arr, niter=10, stepsize=0.01, minimizer_kwargs={"args":(block, n, attn_a, rand_inputs, models), "method": method},
+                          seed=seed, disp=True)
+            else:
+                res = minimize(func, arr, args=(block, n, attn_a, rand_inputs, models), method=method,
+                      options=options, bounds=bounds)
 
             # print results
             print(f"seed = {seed}")
@@ -548,6 +556,7 @@ if __name__ == "__main__":
     parser.add_argument("--sum", help="Weight sum merge mode", action='store_true', default=None, required=False)
     parser.add_argument("--add", help="Add difference merge mode", action='store_true', default=None, required=False)
     parser.add_argument("--fit", "--optimize", dest="optimize", help="Optimize mode", action='store_true', default=False, required=False)
+    parser.add_argument("--global", dest="use_global", help="Global optimize (supported: 'shgo' or 'basin'hopping)", default=None, required=False)
     parser.add_argument('-s', '--seed', type=int, required=False, help='select seed')
     parser.add_argument('-w', '--alpha', dest='init', required=False, help='initial weights')
     parser.add_argument('-d', '--debug', required=False, action='store_true', help='debug some information')
@@ -728,7 +737,7 @@ if __name__ == "__main__":
         # print options
         torch.set_printoptions(sci_mode=False, precision=6)
 
-        r = fit(files, selected=opt_sel_blocks, inits=inits, method=opt_method, xtol=xtol, float32=args.float32, evaluate=args.eval)
+        r = fit(files, selected=opt_sel_blocks, inits=inits, method=opt_method, xtol=xtol, float32=args.float32, evaluate=args.eval, use_global=args.use_global)
         # load old results
         if not args.eval and Path("tmp.npy").exists() and not args.clear:
             tmp = np.load("tmp.npy", allow_pickle=True)
