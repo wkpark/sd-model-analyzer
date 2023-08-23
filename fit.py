@@ -556,7 +556,7 @@ if __name__ == "__main__":
     parser.add_argument('-x', '--xtol', required=False, help='xtol option for optimize')
     parser.add_argument('-c', '--clear', required=False, action='store_true', help='clear saved file (tmp.npy)')
     parser.add_argument('--fp32', '--usefp32', dest='float32', required=False, action='store_true', help='Use float32')
-    parser.add_argument('-O', dest='output', required=False, default='merged', help='Merged output file')
+    parser.add_argument('-O', dest='output', required=False, default='merged.safetensors', help='Merged output file')
     parser.add_argument('files', nargs='+', metavar='file', help='model file names')
 
     args = parser.parse_args()
@@ -862,8 +862,15 @@ if __name__ == "__main__":
             save_needed = True
 
     if len(theta_0) > 0 and save_needed:
-        output_file = f"{args.output}.safetensors"
+        output_file = args.output
+        ext = Path(output_file).suffix
+        if ext not in [ ".ckpt", ".safetensors" ]:
+            output_file = output_file + ".safetensors"
+            ext = Path(output_file).suffix
         print(f"saving {output_file}...")
-        save_file(theta_0, output_file, metadata)
+        if ext == ".safetensors":
+            save_file(theta_0, output_file, metadata)
+        else:
+            torch.save({"state_dict": theta_0}, output_file)
         print("Done.")
 
