@@ -411,6 +411,7 @@ def merge(files, mode="sum", selected=None, weights=None, prune=True, float32=Fa
     metadata = { "format": "pt" }
     merge_recipe = {
         "type": "sd-model-analyzer",
+        "blocks": print_blocks(selected),
         "weights_alpha": weights,
         "model_a": file1.name,
         "mode": modes,
@@ -512,7 +513,7 @@ def merge(files, mode="sum", selected=None, weights=None, prune=True, float32=Fa
     for key in (tqdm(keyremains, desc="Save unchanged remains")):
         theta_0[key] = model_a[key]
     t1 = time.time()
-    print(f"- execution time: {t1 - t0}")
+    print(f"- execution time: {t1 - t0:.4f}sec")
 
     merge_recipe["model_recipe"] = recipe_all
     metadata["sd_merge_recipe"] = json.dumps(merge_recipe)
@@ -536,7 +537,7 @@ def load_saved(ret):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fit merged models or merge models")
     parser.add_argument('-i', '--in', dest='inp', required=False, help='input blocks')
-    parser.add_argument('-m', '--mid', required=False, action='store_true', help='middle block')
+    parser.add_argument('-m', '--mid', required=False, action='store_true', default=None, help='middle block')
     parser.add_argument('-o', '--out', required=False, help='output blocks')
     parser.add_argument('-a', '--all', required=False, action='store_true', help='all blocks')
     parser.add_argument("--base", help="select base encoder", action='store_true', default=None, required=False)
@@ -577,7 +578,6 @@ if __name__ == "__main__":
                 pass
 
         if len(blk) > 0:
-            print(f"selected input_blocks are {blk}")
             inp_blocks = blk
 
     if args.out is not None:
@@ -757,7 +757,7 @@ if __name__ == "__main__":
         if args.eval:
             for k in ret.keys():
                 print(f" - {k} : {-ret[k] * 1e2:.4f}%")
-    elif args.vae is None and not args.novae and not args.prune and Path("tmp.npy").exists():
+    elif len(modes) == 0 and args.vae is None and not args.novae and not args.prune and Path("tmp.npy").exists():
         print("Print saved info from tmp.npy...")
         tmp = np.load("tmp.npy", allow_pickle=True)
         ret = tmp.tolist()
@@ -794,10 +794,10 @@ if __name__ == "__main__":
                 mean_coeff[j][i] = mean_out[i][j]
 
         for i in range(0, len(coeff)):
-            print_out = f"alpha  = ({','.join('0' if s < 1e-4 else str(round(s,5)) for s in coeff[i])})"
+            print_out = f"alpha  = ({','.join('0' if abs(s) < 1e-4 else str(round(s,5)) for s in coeff[i])})"
             print(print_out)
         for i in range(0, len(coeff)):
-            print_out = f"mean a = ({','.join('0' if s < 1e-4 else str(round(s,5)) for s in mean_coeff[i])})"
+            print_out = f"mean a = ({','.join('0' if abs(s) < 1e-4 else str(round(s,5)) for s in mean_coeff[i])})"
             print(print_out)
 
     # merge models or manage model file
