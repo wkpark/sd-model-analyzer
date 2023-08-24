@@ -553,6 +553,7 @@ if __name__ == "__main__":
     parser.add_argument("--novae", help="no vae", action='store_true', default=False, required=False)
     parser.add_argument("-p", "--prune", help="Pruning before merge", action='store_true', default=False, required=False)
     parser.add_argument("--mode", type=str, help="Merge mode (weight sum: Sum, Add difference: Add, Multiple add-diff: Madd)", default=None, required=False)
+    parser.add_argument("--nometadata", help="Do not save metadata", default=False, action='store_true', required=False)
     parser.add_argument("--sum", help="Weight sum merge mode", action='store_true', default=None, required=False)
     parser.add_argument("--add", help="Add difference merge mode", action='store_true', default=None, required=False)
     parser.add_argument("--fit", "--optimize", dest="optimize", help="Optimize mode", action='store_true', default=False, required=False)
@@ -901,7 +902,16 @@ if __name__ == "__main__":
         ext = Path(output_file).suffix
         if ext not in [ ".ckpt", ".safetensors" ]:
             output_file = output_file + ".safetensors"
-            ext = Path(output_file).suffix
+            ext = ".safetensors"
+        outfile = Path(output_file)
+        if args.nometadata:
+            metadata_file = outfile.with_suffix('.json')
+            with metadata_file.open("w") as json_file:
+                print(f"save metadata to {metadata_file}")
+                json.dump(metadata, json_file)
+            # minimal metadata for safetensors
+            metadata = { "format": "pt" }
+
         print(f"saving {output_file}...")
         if ext == ".safetensors":
             save_file(theta_0, output_file, metadata)
