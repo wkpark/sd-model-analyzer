@@ -52,6 +52,21 @@ def cal_cross_attn(q, k, v, input):
         attn_to_v(input)
     )
 
+def cal_cross_attn2(q, k, v, input, context=None):
+    hidden_dim, embed_dim = k.shape
+    attn_to_q = nn.Linear(hidden_dim, hidden_dim, bias=False)
+    attn_to_k = nn.Linear(embed_dim, hidden_dim, bias=False)
+    attn_to_v = nn.Linear(embed_dim, hidden_dim, bias=False)
+    attn_to_q.load_state_dict({"weight": q})
+    attn_to_k.load_state_dict({"weight": k})
+    attn_to_v.load_state_dict({"weight": v})
+
+    return torch.einsum(
+        "ik, jk -> ik",
+        F.softmax(torch.einsum("ij, kj -> ik", attn_to_q(context), attn_to_k(input)), dim=-1),
+        attn_to_v(input)
+    )
+
 def model_hash_old(filename):
     try:
         with open(filename, "rb") as file:
@@ -125,7 +140,7 @@ def read_metadata_from_safetensors(filename):
 
         return res
 
-def eval(model, block, n, input):
+def eval(model, block, n, input, input2):
     if block ==  "middle_block":
         keybase = f"model.diffusion_model.middle_block.1.transformer_blocks"
     else:
@@ -139,7 +154,15 @@ def eval(model, block, n, input):
 
     attn = cal_cross_attn(atoq, atok, atov, input)
 
-    return attn
+    qk = f"{keybase}.0.attn2.to_q.weight"
+    uk = f"{keybase}.0.attn2.to_k.weight"
+    vk = f"{keybase}.0.attn2.to_v.weight"
+
+    atoq, atok, atov = model[qk], model[uk], model[vk]
+
+    attn2 = cal_cross_attn2(atoq, atok, atov, input2, input)
+
+    return attn + attn2
 
 def load_qkvs(model, block, n, base_model = None, float32 = False):
     if block ==  "middle_block":
@@ -148,8 +171,14 @@ def load_qkvs(model, block, n, base_model = None, float32 = False):
         keybase = f"model.diffusion_model.{block}.{n}.1.transformer_blocks"
 
     qkvs = {}
+    keys = []
     for qkv in "to_q", "to_k", "to_v":
         key = f"{keybase}.0.attn1.{qkv}.weight"
+        keys.append(key)
+        key = f"{keybase}.0.attn2.{qkv}.weight"
+        keys.append(key)
+
+    for key in keys:
         if base_model is not None and base_model[key] is not None:
             base_qkvs = to_half(base_model[key], not float32)
             qkvs[key] = model[key] - base_qkvs
@@ -165,11 +194,12 @@ def init_rand(model, block, n):
     else:
         keybase = f"model.diffusion_model.{block}.{n}.1.transformer_blocks"
 
-    hidden_dim, embed_dim = model[f"{keybase}.0.attn1.to_q.weight"].shape
+    hidden_dim, embed_dim = model[f"{keybase}.0.attn2.to_k.weight"].shape
 
-    rand_input = torch.randn([embed_dim, hidden_dim])
+    rand_input = torch.randn([hidden_dim, hidden_dim])
+    rand_input2 = torch.randn([hidden_dim, embed_dim])
 
-    return rand_input
+    return rand_input, rand_input2
 
 def func(x, block, n, attn_a, rand_inputs, models):
 
@@ -181,6 +211,9 @@ def func(x, block, n, attn_a, rand_inputs, models):
     qk = f"{keybase}.0.attn1.to_q.weight"
     kk = f"{keybase}.0.attn1.to_k.weight"
     vk = f"{keybase}.0.attn1.to_v.weight"
+    qk2 = f"{keybase}.0.attn2.to_q.weight"
+    kk2 = f"{keybase}.0.attn2.to_k.weight"
+    vk2 = f"{keybase}.0.attn2.to_v.weight"
 
     theta_0 = {}
 
@@ -197,28 +230,22 @@ def func(x, block, n, attn_a, rand_inputs, models):
     theta_0[qk] = base_model[qk]
     theta_0[kk] = base_model[kk]
     theta_0[vk] = base_model[vk]
-    #theta_0[qk] = base_model.get(qk, torch.zeros_like(base_model[qk]))
-    #theta_0[kk] = base_model.get(kk, torch.zeros_like(base_model[kk]))
-    #theta_0[vk] = base_model.get(vk, torch.zeros_like(base_model[vk]))
+
+    theta_0[qk2] = base_model[qk2]
+    theta_0[kk2] = base_model[kk2]
+    theta_0[vk2] = base_model[vk2]
 
     for i in range(0, len(x)):
         model_name = f"model_{chr(97+i)}"
         theta_0[qk] = theta_0[qk] + models[model_name][qk] * y[i]
         theta_0[kk] = theta_0[kk] + models[model_name][kk] * y[i]
         theta_0[vk] = theta_0[vk] + models[model_name][vk] * y[i]
+        theta_0[qk2] = theta_0[qk2] + models[model_name][qk2] * y[i]
+        theta_0[kk2] = theta_0[kk2] + models[model_name][kk2] * y[i]
+        theta_0[vk2] = theta_0[vk2] + models[model_name][vk2] * y[i]
 
-    '''
-    # for example (each mode_x term is 'add-difference' result of mode_a as 'modelA - base_model')
-        model_a = models["model_a"]
-        model_b = models["model_b"]
-        model_c = models["model_c"]
-        model_d = models["model_d"]
-        theta_0[qk] = base_model[qk] + model_a[qk] * x[0] + model_b[qk] * x[1] + model_c[qk] * x[2] + model_d[qk] * x[3]
-        theta_0[kk] = base_model[kk] + model_a[kk] * x[0] + model_b[kk] * x[1] + model_c[kk] * x[2] + model_d[kk] * x[3]
-        theta_0[vk] = base_model[vk] + model_a[vk] * x[0] + model_b[vk] * x[1] + model_c[vk] * x[2] + model_d[vk] * x[3]
-    '''
-
-    attn_b = eval(theta_0, block, n, rand_inputs[f"{block}.{n}"])
+    rand_input, rand_input2 = rand_inputs[f"{block}.{n}"]
+    attn_b = eval(theta_0, block, n, rand_input, rand_input2)
 
     sim = -torch.mean(torch.cosine_similarity(attn_a, attn_b))
 
@@ -227,7 +254,7 @@ def func(x, block, n, attn_a, rand_inputs, models):
 
     return val
 
-def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.00001, float32=False, evaluate=False, use_global=None):
+def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.000001, float32=False, evaluate=False, use_global=None):
     global models
 
     file1 = Path(files[0])
@@ -279,13 +306,13 @@ def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.00001, fl
 
         qkvs = load_qkvs(fit_model, block, n, float32=float32)
         if f"{block}.{n}" in rand_inputs.keys():
-            rand_input = rand_inputs[f"{block}.{n}"]
+            rand_input, rand_input2 = rand_inputs[f"{block}.{n}"]
         else:
-            rand_input = init_rand(qkvs, block, n)
-            rand_inputs[f"{block}.{n}"] = rand_input
+            rand_input, rand_input2 = init_rand(qkvs, block, n)
+            rand_inputs[f"{block}.{n}"] = (rand_input, rand_input2)
 
         # load the original model
-        attn_a = eval(qkvs, block, n, rand_input)
+        attn_a = eval(qkvs, block, n, rand_input, rand_input2)
 
         arr = []
         # bounds
@@ -727,7 +754,7 @@ if __name__ == "__main__":
         if args.seed is not None:
              seed = args.seed
 
-        xtol = float(args.xtol) if args.xtol else 0.00001
+        xtol = float(args.xtol) if args.xtol else 0.000001
         opt_method = args.method.lower() if args.method and args.method.lower() in opt_methods else "nelder-mead"
 
         print(f" * seed = {seed}")
