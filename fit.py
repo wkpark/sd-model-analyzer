@@ -806,11 +806,11 @@ if __name__ == "__main__":
         mean_out = []
         blocks = all_blocks()
         outs = []
-        for k in blocks:
-            k = k.rstrip(".")
+        for b in blocks:
+            k = b.rstrip(".")
             if k not in ret:
                 continue
-            outs.append(k)
+            outs.append(b)
             x = torch.Tensor(ret[k]["x"]).detach().numpy()
             x = x.tolist()
             xx = torch.Tensor(ret[k]["mean"]).detach().numpy()
@@ -846,7 +846,7 @@ if __name__ == "__main__":
                     if s in b:
                         norm[k] = coeff[j]
             normalout = f"({','.join('0' if s == 0.0 else str(round(s,5)) for s in norm)})"
-            print(f"  > normalized block weights for model #{i}: {normalout}")
+            print(f"  > normalized block weights for model #{i+1}: {normalout}")
 
     # merge models or manage model file
     theta_0 = {}
