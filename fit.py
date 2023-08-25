@@ -239,7 +239,7 @@ def func(x, block, n, attn_a, rand_inputs, models):
 
     return val
 
-def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.000001, float32=False, evaluate=False, use_global=None):
+def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.000001, bounds=(None,None), float32=False, evaluate=False, use_global=None):
     global models
 
     file1 = Path(files[0])
@@ -301,8 +301,13 @@ def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.000001, f
 
         arr = []
         # bounds
-        ub = []
-        lb = []
+        ub = [1.5]*len(model_files)
+        lb = [-0.5]*len(model_files)
+        (lowers, uppers) = bounds
+        if lowers is not None:
+            lb = lowers
+        if uppers is not None:
+            ub = uppers
         for j, file in enumerate(model_files):
             file = Path(file)
             name = chr(97 + j)
@@ -320,10 +325,6 @@ def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.000001, f
             models[model_name] = qkvs
 
             arr.append(0.1)
-            # upper bound
-            ub.append(1.5)
-            # lower bound
-            lb.append(-0.5)
             #del model
 
         print(f" - block = {block}, n = {n}")
@@ -572,6 +573,7 @@ if __name__ == "__main__":
     parser.add_argument("--global", dest="use_global", help="Global optimize (supported: 'shgo' or 'basin'hopping)", default=None, required=False)
     parser.add_argument('-s', '--seed', type=int, required=False, help='select seed')
     parser.add_argument('-w', '--alpha', dest='init', required=False, help='initial weights')
+    parser.add_argument('-b', '--bounds', dest='bounds', default=None, required=False, help='bounds')
     parser.add_argument('-d', '--debug', required=False, action='store_true', help='debug some information')
     parser.add_argument('-e', '--eval', required=False, action='store_true', help='evaluate initial weights if available')
     parser.add_argument('--method', required=False, help='optimize method (available method Nelder-Mead:default, Powell)')
@@ -718,6 +720,34 @@ if __name__ == "__main__":
 
     if len(inits) > 0:
         print(f" * alpha = {inits}")
+
+    # setup boundaries
+    uppers = [1.5]*alpha_count
+    lowers = [-0.5]*alpha_count
+    if args.optimize and args.bounds is not None:
+        tmp = args.bounds.split(",") # model
+
+        for j, bs in enumerate(tmp[:alpha_count]):
+            x = bs.replace("\\", "")
+            x = x.split("/")
+            try:
+                if len(x) > 0:
+                    l = float(x[0])
+                if len(x) > 1:
+                    u = float(x[1])
+                uppers[j] = u
+                lowers[j] = l
+            except ValueError:
+                print(f"invalid boundary weight {tmp}")
+                exit(-1)
+        if len(tmp) < alpha_count:
+            for i in range(len(tmp), alpha_count):
+                uppers.append(uppers[len(uppers)-1]) # fill-up empty bounds
+                lowers.append(lowers[len(lowers)-1])
+
+    if len(uppers) > 0:
+        print(f" * lower bounds = {lowers}")
+        print(f" * upper bounds = {uppers}")
     if len(sel_blocks) > 0:
         blocks = all_blocks()
         for l, init in enumerate(inits):
@@ -734,7 +764,7 @@ if __name__ == "__main__":
     debug = args.debug
 
     ret = {}
-    if args.optimize or args.eval:
+    if alpha_count > 0 and (args.optimize or args.eval):
         # set seed
         if args.seed is not None:
              seed = args.seed
@@ -750,7 +780,7 @@ if __name__ == "__main__":
         # print options
         torch.set_printoptions(sci_mode=False, precision=6)
 
-        r = fit(files, selected=opt_sel_blocks, inits=inits, method=opt_method, xtol=xtol, float32=args.float32, evaluate=args.eval, use_global=args.use_global)
+        r = fit(files, selected=opt_sel_blocks, inits=inits, method=opt_method, xtol=xtol, float32=args.float32, bounds=(lowers, uppers), evaluate=args.eval, use_global=args.use_global)
         # load old results
         if not args.eval and Path("tmp.npy").exists() and not args.clear:
             tmp = np.load("tmp.npy", allow_pickle=True)
