@@ -164,19 +164,24 @@ def eval(model, block, n, input, input2):
 
     return attn + attn2
 
-def load_qkvs(model, block, n, base_model = None, float32 = False):
+def get_keys(block, n):
+    keys = []
     if block ==  "middle_block":
         keybase = f"model.diffusion_model.middle_block.1.transformer_blocks"
     else:
         keybase = f"model.diffusion_model.{block}.{n}.1.transformer_blocks"
 
-    qkvs = {}
-    keys = []
     for qkv in "to_q", "to_k", "to_v":
         key = f"{keybase}.0.attn1.{qkv}.weight"
         keys.append(key)
         key = f"{keybase}.0.attn2.{qkv}.weight"
         keys.append(key)
+
+    return keys
+
+def load_qkvs(model, block, n, base_model = None, float32 = False):
+    keys = get_keys(block, n)
+    qkvs = {}
 
     for key in keys:
         if base_model is not None and base_model[key] is not None:
@@ -202,19 +207,8 @@ def init_rand(model, block, n):
     return rand_input, rand_input2
 
 def func(x, block, n, attn_a, rand_inputs, models):
-
-    if block ==  "middle_block":
-        keybase = f"model.diffusion_model.middle_block.1.transformer_blocks"
-    else:
-        keybase = f"model.diffusion_model.{block}.{n}.1.transformer_blocks"
-
-    qk = f"{keybase}.0.attn1.to_q.weight"
-    kk = f"{keybase}.0.attn1.to_k.weight"
-    vk = f"{keybase}.0.attn1.to_v.weight"
-    qk2 = f"{keybase}.0.attn2.to_q.weight"
-    kk2 = f"{keybase}.0.attn2.to_k.weight"
-    vk2 = f"{keybase}.0.attn2.to_v.weight"
-
+    """auxilary function for minimize()"""
+    keys = get_keys(block, n)
     theta_0 = {}
 
     base_model = models["base_model"]
@@ -227,22 +221,13 @@ def func(x, block, n, attn_a, rand_inputs, models):
     #    y[0] = (1.0 - x[0]) * (1.0 - x[1])
     #    y[1] = x[1]
 
-    theta_0[qk] = base_model[qk]
-    theta_0[kk] = base_model[kk]
-    theta_0[vk] = base_model[vk]
-
-    theta_0[qk2] = base_model[qk2]
-    theta_0[kk2] = base_model[kk2]
-    theta_0[vk2] = base_model[vk2]
+    for key in keys:
+        theta_0[key] = base_model[key]
 
     for i in range(0, len(x)):
         model_name = f"model_{chr(97+i)}"
-        theta_0[qk] = theta_0[qk] + models[model_name][qk] * y[i]
-        theta_0[kk] = theta_0[kk] + models[model_name][kk] * y[i]
-        theta_0[vk] = theta_0[vk] + models[model_name][vk] * y[i]
-        theta_0[qk2] = theta_0[qk2] + models[model_name][qk2] * y[i]
-        theta_0[kk2] = theta_0[kk2] + models[model_name][kk2] * y[i]
-        theta_0[vk2] = theta_0[vk2] + models[model_name][vk2] * y[i]
+        for key in keys:
+            theta_0[key] = theta_0[key] + models[model_name][key] * y[i]
 
     rand_input, rand_input2 = rand_inputs[f"{block}.{n}"]
     attn_b = eval(theta_0, block, n, rand_input, rand_input2)
