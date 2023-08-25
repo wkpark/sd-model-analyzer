@@ -795,7 +795,9 @@ if __name__ == "__main__":
                 ret = {}
 
         if args.optimize:
+            print("Check results...")
             for k in r.keys():
+                print(f" - {k} : {r[k].x} {float(-r[k].fun) * 1e2:.4f}%")
                 x = r[k].x
                 fun = float(r[k].fun)
                 count = 1
@@ -814,6 +816,7 @@ if __name__ == "__main__":
                     mean = sum = x
 
                 ret[k] = {"fun": fun, "x": x, "success": r[k].success, "count": count, "mean": mean, "sum": sum}
+            print()
 
         # save results
         if not args.eval:
