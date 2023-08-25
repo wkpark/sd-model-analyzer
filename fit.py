@@ -276,6 +276,8 @@ def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.000001, b
     else:
         base_model = models["base_model"]
 
+    # get bounds
+    (lowers, uppers) = bounds
     ret = {}
     # optimize mode. only cross-attention capable blocks
     for i,x in enumerate(sel_blocks):
@@ -303,7 +305,6 @@ def fit(files, selected=None, inits=None, method='nelder-mead', xtol=0.000001, b
         # bounds
         ub = [1.5]*len(model_files)
         lb = [-0.5]*len(model_files)
-        (lowers, uppers) = bounds
         if lowers is not None:
             lb = lowers
         if uppers is not None:
