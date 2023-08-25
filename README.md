@@ -93,3 +93,10 @@ options:
   --fp32, --usefp32     Use float32
   -O OUTPUT             Merged output file
 ~~~
+
+## Multiple Add Difference mode (madd)
+Multiple Add-Diff mode (madd) is the extended add-difference mode used by the fit program.
+Normal Add-Difference mode is `Merged = A + (B - C)*alpha`, normally `C` is the SD1.5 base model like `v1-5-pruned-emaonly.safetensors`.
+this equation could be expressed like `A = a + base_model`, `B = b + base_model` then `Merged = a + base_model + (b + base_model - base_model) * alpha` = `base_model + a + b * alpha`.
+
+In general, a series of add-differences could be expressed by `merged = base_model + a * alpha_0 + b * alpha_1 + c * alpha_2...`
