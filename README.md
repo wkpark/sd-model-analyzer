@@ -1,4 +1,4 @@
-# ad-model-analyzer
+# sd-model-analyzer
 Merged model analyzer using scipy's [scipy.optimize.minimize()](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.minimize.html)
 
 ## usage
